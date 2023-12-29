@@ -55,6 +55,8 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
+
+	"github.com/ava-labs/subnet-evm/mamoru"
 )
 
 var (
@@ -297,6 +299,11 @@ type BlockChain struct {
 
 	// [acceptedLogsCache] stores recently accepted logs to improve the performance of eth_getLogs.
 	acceptedLogsCache FIFOCache[common.Hash, [][]*types.Log]
+
+	// mamoru Sniffer
+	Sniffer *mamoru.Sniffer
+	// mamoru Feeder
+	MamoruFeeder mamoru.Feeder
 }
 
 // NewBlockChain returns a fully initialised block chain using information
@@ -356,6 +363,11 @@ func NewBlockChain(
 	bc.stateCache = state.NewDatabaseWithNodeDB(bc.db, bc.triedb)
 	bc.validator = NewBlockValidator(chainConfig, bc, engine)
 	bc.processor = NewStateProcessor(chainConfig, bc, engine)
+
+	// mamoru Sniffer
+	bc.Sniffer = mamoru.NewSniffer()
+	// mamoru MamoruFeeder
+	bc.MamoruFeeder = nil
 
 	bc.hc, err = NewHeaderChain(db, chainConfig, cacheConfig, engine)
 	if err != nil {
@@ -429,6 +441,9 @@ func NewBlockChain(
 		bc.wg.Add(1)
 		go bc.dispatchTxUnindexer()
 	}
+
+	log.Info("Mamoru blockchain initialized")
+
 	return bc, nil
 }
 
@@ -1375,9 +1390,22 @@ func (bc *BlockChain) insertBlock(block *types.Block, writes bool) error {
 	statedb.StartPrefetcher("chain")
 	activeState = statedb
 
+	//////////////////////////////////////////////////////////////
+	// Enable Debug mod and Set Mamoru Tracer
+	bc.vmConfig.Tracer = nil
+	if bc.Sniffer.CheckRequirements() {
+		bc.vmConfig.Tracer = mamoru.NewCallStackTracer(block.Transactions(), mamoru.RandStr(8)+"_"+block.Number().String(), false, mamoru.CtxBlockchain)
+	}
+	//////////////////////////////////////////////////////////////
+
+	// If we have a followup block, run that against the current state to pre-cache
+	// transactions and probabilistically some of the account/storage trie nodes.
 	// Process block using the parent state as reference point
 	pstart := time.Now()
 	receipts, logs, usedGas, err := bc.processor.Process(block, parent, statedb, bc.vmConfig)
+
+	log.Info("Mamoru Processed transaction", "number", block.Number(), "hash", block.Hash(), "elapsed", common.PrettyDuration(time.Since(substart)))
+
 	if serr := statedb.Error(); serr != nil {
 		log.Error("statedb error encountered", "err", serr, "number", block.Number(), "hash", block.Hash())
 	}
